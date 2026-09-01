@@ -2,8 +2,10 @@ import datetime
 import json
 import sys
 import urllib
+import urllib.request
 import os
 import logging
+import shutil
 from pathlib import Path
 
 import httpx
@@ -49,8 +51,8 @@ class Osintgram:
     def __init__(self, target, is_file, is_json, is_cli, output_dir, clear_cookies):
         self.output_dir = output_dir or self.output_dir        
         u = config.getUsername()
-        p = config.getPassword()
         s = config.getSessionId()
+        p = config.getPassword(required=not s)
         self.clear_cookies(clear_cookies)
         self.cli_mode = is_cli
         if not is_cli:
@@ -73,6 +75,47 @@ class Osintgram:
         self.__printTargetBanner__()
         self.output_dir = self.output_dir + "/" + str(self.target)
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        self.json_dir = Path(self.output_dir) / "json"
+        self.txt_dir = Path(self.output_dir) / "txt"
+        self.posts_dir = Path(self.output_dir) / "media" / "posts"
+        self.profile_pic_dir = Path(self.output_dir) / "media" / "profile_pic"
+        self.stories_dir = Path(self.output_dir) / "media" / "stories"
+        for directory in (
+            self.json_dir,
+            self.txt_dir,
+            self.posts_dir,
+            self.profile_pic_dir,
+            self.stories_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        self._organize_existing_output()
+
+    def _organize_existing_output(self):
+        target_dir = Path(self.output_dir)
+        for file in target_dir.iterdir():
+            if not file.is_file():
+                continue
+            if file.suffix == ".json":
+                destination_dir = self.json_dir
+            elif file.suffix == ".txt":
+                destination_dir = self.txt_dir
+            elif file.name.endswith("_propic.jpg"):
+                destination_dir = self.profile_pic_dir
+            elif file.suffix in (".jpg", ".jpeg", ".png", ".mp4", ".mov"):
+                destination_dir = self.posts_dir
+            else:
+                continue
+            destination = destination_dir / file.name
+            if not destination.exists():
+                shutil.move(str(file), str(destination))
+
+        legacy_media_dir = target_dir / "media"
+        if legacy_media_dir.is_dir():
+            for file in legacy_media_dir.iterdir():
+                if file.is_file():
+                    destination = self.posts_dir / file.name
+                    if not destination.exists():
+                        shutil.move(str(file), str(destination))
 
     def __get_feed__(self):
         medias = self.api.user_medias(self.target_id, amount=0)
@@ -172,8 +215,10 @@ class Osintgram:
             pc.printout(" [PRIVATE PROFILE]", pc.BLUE)
         if self.following:
             pc.printout(" [FOLLOWING]", pc.GREEN)
-        else:
+        elif self.following is False:
             pc.printout(" [NOT FOLLOWING]", pc.RED)
+        else:
+            pc.printout(" [FOLLOW STATUS UNKNOWN]", pc.YELLOW)
 
         print('\n')
 
@@ -235,14 +280,14 @@ class Osintgram:
                 i = i + 1
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_addrs.txt"
+                file_name = self.txt_dir / (self.target + "_addrs.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['address'] = addrs_list
-                json_file_name = self.output_dir + "/" + self.target + "_addrs.json"
+                json_file_name = self.json_dir / (self.target + "_addrs.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -285,7 +330,7 @@ class Osintgram:
             file = None
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_captions.txt"
+                file_name = self.txt_dir / (self.target + "_captions.txt")
                 file = open(file_name, "w")
 
             for s in captions:
@@ -296,7 +341,7 @@ class Osintgram:
 
             if self.jsonDump:
                 json_data['captions'] = captions
-                json_file_name = self.output_dir + "/" + self.target + "_followings.json"
+                json_file_name = self.json_dir / (self.target + "_followings.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -307,6 +352,65 @@ class Osintgram:
             pc.printout("Sorry! No results found :-(\n", pc.RED)
 
         return
+
+    def get_media_urls(self):
+        if self.check_private_profile():
+            return
+
+        pc.printout("Searching for target media URLs...\n")
+        media = []
+        for item in self.__get_feed__():
+            urls = []
+            candidates = item.get("image_versions2", {}).get("candidates", [])
+            if candidates:
+                urls.append(candidates[0].get("url"))
+            if item.get("video_url"):
+                urls.append(item["video_url"])
+            for child in item.get("carousel_media", []):
+                child_candidates = child.get("image_versions2", {}).get("candidates", [])
+                if child_candidates:
+                    urls.append(child_candidates[0].get("url"))
+                if child.get("video_url"):
+                    urls.append(child["video_url"])
+
+            media.append({
+                "id": str(item.get("id") or item.get("pk")),
+                "taken_at": item.get("taken_at"),
+                "caption": (item.get("caption") or {}).get("text"),
+                "urls": [url for url in urls if url],
+            })
+
+        if self.jsonDump:
+            path = self.json_dir / (self.target + "_media.json")
+            with open(path, "w") as file:
+                json.dump({"media": media}, file, indent=2)
+        if self.writeFile:
+            path = self.txt_dir / (self.target + "_media.txt")
+            with open(path, "w") as file:
+                for item in media:
+                    file.write("Post {}\n".format(item["id"]))
+                    for url in item["urls"]:
+                        file.write(url + "\n")
+                    file.write("\n")
+
+        downloaded = 0
+        for item in media:
+            post_id = item["id"].replace("/", "_")
+            for index, url in enumerate(item["urls"], start=1):
+                extension = ".mp4" if ".mp4" in url.split("?")[0] else ".jpg"
+                destination = self.posts_dir / "{}_{}{}".format(post_id, index, extension)
+                try:
+                    urllib.request.urlretrieve(url, destination)
+                    downloaded += 1
+                except Exception as error:
+                    pc.printout("Could not download {}: {}\n".format(url, error), pc.RED)
+
+        pc.printout(
+            "Saved URLs for {} media posts and downloaded {} files.\n".format(
+                len(media), downloaded
+            ),
+            pc.GREEN,
+        )
 
     def get_total_comments(self):
         if self.check_private_profile():
@@ -324,7 +428,7 @@ class Osintgram:
             posts += 1
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_comments.txt"
+            file_name = self.txt_dir / (self.target + "_comments.txt")
             file = open(file_name, "w")
             file.write(str(comments_counter) + " comments in " + str(posts) + " posts\n")
             file.close()
@@ -334,7 +438,7 @@ class Osintgram:
                 'comment_counter': comments_counter,
                 'posts': posts
             }
-            json_file_name = self.output_dir + "/" + self.target + "_comments.json"
+            json_file_name = self.json_dir / (self.target + "_comments.json")
             with open(json_file_name, 'w') as f:
                 json.dump(json_data, f)
 
@@ -370,13 +474,13 @@ class Osintgram:
         
         print(t)
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_comment_data.txt"
+            file_name = self.txt_dir / (self.target + "_comment_data.txt")
             with open(file_name, 'w') as f:
                 f.write(str(t))
                 f.close()
         
         if self.jsonDump:
-            file_name_json = self.output_dir + "/" + self.target + "_comment_data.json"
+            file_name_json = self.json_dir / (self.target + "_comment_data.json")
             with open(file_name_json, 'w') as f:
                 f.write("{ \"Comments\":[ \n")
                 f.write('\n'.join(json.dumps(c) for c in _comments) + ',\n')
@@ -422,14 +526,14 @@ class Osintgram:
                 followings_list.append(follow)
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_followers.txt"
+            file_name = self.txt_dir / (self.target + "_followers.txt")
             file = open(file_name, "w")
             file.write(str(t))
             file.close()
 
         if self.jsonDump:
             json_data['followers'] = followers
-            json_file_name = self.output_dir + "/" + self.target + "_followers.json"
+            json_file_name = self.json_dir / (self.target + "_followers.json")
             with open(json_file_name, 'w') as f:
                 json.dump(json_data, f)
 
@@ -474,14 +578,14 @@ class Osintgram:
                 followings_list.append(follow)
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_followings.txt"
+            file_name = self.txt_dir / (self.target + "_followings.txt")
             file = open(file_name, "w")
             file.write(str(t))
             file.close()
 
         if self.jsonDump:
             json_data['followings'] = followings_list
-            json_file_name = self.output_dir + "/" + self.target + "_followings.json"
+            json_file_name = self.json_dir / (self.target + "_followings.json")
             with open(json_file_name, 'w') as f:
                 json.dump(json_data, f)
 
@@ -522,7 +626,7 @@ class Osintgram:
             hashtags_list = []
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_hashtags.txt"
+                file_name = self.txt_dir / (self.target + "_hashtags.txt")
                 file = open(file_name, "w")
 
             for k, v in ssort:
@@ -538,7 +642,7 @@ class Osintgram:
 
             if self.jsonDump:
                 json_data['hashtags'] = hashtags_list
-                json_file_name = self.output_dir + "/" + self.target + "_hashtags.json"
+                json_file_name = self.json_dir / (self.target + "_hashtags.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
         else:
@@ -605,7 +709,7 @@ class Osintgram:
                 if data.address_street:
                     user['address_street'] = data.address_street
 
-                json_file_name = self.output_dir + "/" + self.target + "_info.json"
+                json_file_name = self.json_dir / (self.target + "_info.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(user, f)
 
@@ -635,7 +739,7 @@ class Osintgram:
         result = f" likes in {posts} posts (min: {min_}, max: {max_}, avg: {avg})\n"
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_likes.txt"
+            file_name = self.txt_dir / (self.target + "_likes.txt")
             file = open(file_name, "w")
             file.write(str(like_counter) + result)
             file.close()
@@ -648,7 +752,7 @@ class Osintgram:
                 "max": max_,
                 "avg": avg,
             }
-            json_file_name = self.output_dir + "/" + self.target + "_likes.json"
+            json_file_name = self.json_dir / (self.target + "_likes.json")
             with open(json_file_name, "w") as f:
                 json.dump(json_data, f)
 
@@ -683,7 +787,7 @@ class Osintgram:
         if counter > 0:
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_mediatype.txt"
+                file_name = self.txt_dir / (self.target + "_mediatype.txt")
                 file = open(file_name, "w")
                 file.write(str(photo_counter) + " photos and " + str(video_counter) + " video posted by target\n")
                 file.close()
@@ -696,7 +800,7 @@ class Osintgram:
                     "photos": photo_counter,
                     "videos": video_counter
                 }
-                json_file_name = self.output_dir + "/" + self.target + "_mediatype.json"
+                json_file_name = self.json_dir / (self.target + "_mediatype.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -748,14 +852,14 @@ class Osintgram:
             print(t)
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_users_who_commented.txt"
+                file_name = self.txt_dir / (self.target + "_users_who_commented.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['users_who_commented'] = ssort
-                json_file_name = self.output_dir + "/" + self.target + "_users_who_commented.json"
+                json_file_name = self.json_dir / (self.target + "_users_who_commented.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
         else:
@@ -810,14 +914,14 @@ class Osintgram:
             print(t)
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_users_who_tagged.txt"
+                file_name = self.txt_dir / (self.target + "_users_who_tagged.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['users_who_tagged'] = ssort
-                json_file_name = self.output_dir + "/" + self.target + "_users_who_tagged.json"
+                json_file_name = self.json_dir / (self.target + "_users_who_tagged.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
         else:
@@ -854,14 +958,14 @@ class Osintgram:
                 count += 1
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_photodes.txt"
+                file_name = self.txt_dir / (self.target + "_photodes.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['descriptions'] = descriptions_list
-                json_file_name = self.output_dir + "/" + self.target + "_descriptions.json"
+                json_file_name = self.json_dir / (self.target + "_descriptions.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -902,7 +1006,7 @@ class Osintgram:
                     counter = counter + 1
                     url = item["image_versions2"]["candidates"][0]["url"]
                     photo_id = item["id"]
-                    end = self.output_dir + "/" + self.target + "_" + str(photo_id) + ".jpg"
+                    end = self.posts_dir / (self.target + "_" + str(photo_id) + ".jpg")
                     urllib.request.urlretrieve(url, end)
                     sys.stdout.write("\rDownloaded %i" % counter)
                     sys.stdout.flush()
@@ -915,7 +1019,7 @@ class Osintgram:
                             counter = counter + 1
                             url = i["image_versions2"]["candidates"][0]["url"]
                             photo_id = i["id"]
-                            end = self.output_dir + "/" + self.target + "_" + str(photo_id) + ".jpg"
+                            end = self.posts_dir / (self.target + "_" + str(photo_id) + ".jpg")
                             urllib.request.urlretrieve(url, end)
                             sys.stdout.write("\rDownloaded %i" % counter)
                             sys.stdout.flush()
@@ -938,7 +1042,7 @@ class Osintgram:
             URL = str(data.profile_pic_url_hd or data.profile_pic_url)
 
             if URL:
-                end = self.output_dir + "/" + self.target + "_propic.jpg"
+                end = self.profile_pic_dir / (self.target + "_propic.jpg")
                 urllib.request.urlretrieve(URL, end)
                 pc.printout("Target propic saved in output folder\n", pc.GREEN)
             else:
@@ -964,11 +1068,11 @@ class Osintgram:
                 story_id = story.id
                 if story.media_type == 1:
                     url = str(story.thumbnail_url)
-                    end = self.output_dir + "/" + self.target + "_" + str(story_id) + ".jpg"
+                    end = self.stories_dir / (self.target + "_" + str(story_id) + ".jpg")
                     urllib.request.urlretrieve(url, end)
                 elif story.media_type == 2:
                     url = str(story.video_url)
-                    end = self.output_dir + "/" + self.target + "_" + str(story_id) + ".mp4"
+                    end = self.stories_dir / (self.target + "_" + str(story_id) + ".mp4")
                     urllib.request.urlretrieve(url, end)
 
         if counter > 0:
@@ -1034,14 +1138,14 @@ class Osintgram:
                     tagged_list.append(tag)
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_tagged.txt"
+                file_name = self.txt_dir / (self.target + "_tagged.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['tagged'] = tagged_list
-                json_file_name = self.output_dir + "/" + self.target + "_tagged.json"
+                json_file_name = self.json_dir / (self.target + "_tagged.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -1053,7 +1157,7 @@ class Osintgram:
         try:
             content = self.api.user_info_by_username(username)
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_user_id.txt"
+                file_name = self.txt_dir / (self.target + "_user_id.txt")
                 file = open(file_name, "w")
                 file.write(str(content.pk))
                 file.close()
@@ -1173,17 +1277,26 @@ class Osintgram:
         raise e
 
     def check_following(self):
-        if self.target_id == self.api.user_id:
+        if str(self.target_id) == str(self.api.user_id):
             return True
         try:
             friendship = self.api.user_friendship_status(self.target_id)
-            return friendship.following
-        except Exception:
-            return False
+            if isinstance(friendship, dict):
+                return friendship.get("following")
+            return getattr(friendship, "following", None)
+        except Exception as error:
+            logger.warning(
+                "Could not determine friendship status for %s: %s",
+                self.target,
+                error,
+            )
+            return None
 
     def check_private_profile(self):
-        if self.is_private and not self.following:
+        if self.is_private and self.following is False:
             pc.printout("Impossible to execute command: user has private profile\n", pc.RED)
+            if self.cli_mode:
+                return True
             send = input("Do you want send a follow request? [Y/N]: ")
             if send.lower() == "y":
                 self.api.user_follow(self.target_id)
@@ -1265,14 +1378,14 @@ class Osintgram:
                 t.add_row([str(node['id']), node['username'], node['full_name'], node['email']])
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_fwersemail.txt"
+                file_name = self.txt_dir / (self.target + "_fwersemail.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['followers_email'] = results
-                json_file_name = self.output_dir + "/" + self.target + "_fwersemail.json"
+                json_file_name = self.json_dir / (self.target + "_fwersemail.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -1355,14 +1468,14 @@ class Osintgram:
                 t.add_row([str(node['id']), node['username'], node['full_name'], node['email']])
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_fwingsemail.txt"
+                file_name = self.txt_dir / (self.target + "_fwingsemail.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['followings_email'] = results
-                json_file_name = self.output_dir + "/" + self.target + "_fwingsemail.json"
+                json_file_name = self.json_dir / (self.target + "_fwingsemail.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -1444,14 +1557,14 @@ class Osintgram:
                 t.add_row([str(node['id']), node['username'], node['full_name'], node['contact_phone_number']])
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_fwingsnumber.txt"
+                file_name = self.txt_dir / (self.target + "_fwingsnumber.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['followings_phone_numbers'] = results
-                json_file_name = self.output_dir + "/" + self.target + "_fwingsnumber.json"
+                json_file_name = self.json_dir / (self.target + "_fwingsnumber.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -1534,14 +1647,14 @@ class Osintgram:
                 t.add_row([str(node['id']), node['username'], node['full_name'], node['contact_phone_number']])
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_fwersnumber.txt"
+                file_name = self.txt_dir / (self.target + "_fwersnumber.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['followings_phone_numbers'] = results
-                json_file_name = self.output_dir + "/" + self.target + "_fwerssnumber.json"
+                json_file_name = self.json_dir / (self.target + "_fwerssnumber.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
 
@@ -1596,14 +1709,14 @@ class Osintgram:
             print(t)
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_users_who_commented.txt"
+                file_name = self.txt_dir / (self.target + "_users_who_commented.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data['users_who_commented'] = ssort
-                json_file_name = self.output_dir + "/" + self.target + "_users_who_commented.json"
+                json_file_name = self.json_dir / (self.target + "_users_who_commented.json")
                 with open(json_file_name, 'w') as f:
                     json.dump(json_data, f)
         else:

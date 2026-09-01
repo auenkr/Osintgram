@@ -28,17 +28,19 @@ def getUsername():
         pc.printout('Error: missing "username" field in "config/credentials.ini"\n', pc.RED)
         sys.exit(0)
 
-def getPassword():
+def getPassword(required=True):
     try:
 
         password = config["Credentials"]["password"]
 
-        if password == '':
+        if password == '' and required:
             pc.printout('Error: "password" field cannot be blank in "config/credentials.ini"\n', pc.RED)
             sys.exit(0)
 
         return password
     except KeyError:
+        if not required:
+            return ''
         pc.printout('Error: missing "password" field in "config/credentials.ini"\n', pc.RED)
         sys.exit(0)
 

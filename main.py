@@ -3,6 +3,9 @@ import os
 import sys
 import signal
 import argparse
+import time
+
+from instagrapi.exceptions import ClientThrottledError, PleaseWaitFewMinutes
 
 from src import artwork, config
 from src import printcolors as pc
@@ -120,6 +123,10 @@ parser.add_argument('-j', '--json', help='save commands output as JSON file', ac
 parser.add_argument('-f', '--file', help='save output in a file', action='store_true')
 parser.add_argument('-c', '--command', help='run in single command mode & execute provided command', action='store')
 parser.add_argument('-o', '--output', help='where to store photos', action='store')
+parser.add_argument('--retries', type=int, default=3,
+                    help='number of retries after a rate limit (default: 3)')
+parser.add_argument('--retry-delay', type=int, default=60,
+                    help='initial rate-limit retry delay in seconds (default: 60)')
 
 args = parser.parse_args()
 
@@ -128,6 +135,23 @@ if config.getHikerToken():
     api = HikerCLI(args.id, args.file, args.json, args.command, args.output, args.cookies)
 else:
     api = Osintgram(args.id, args.file, args.json, args.command, args.output, args.cookies)
+
+
+def execute_with_retry(command, name):
+    for attempt in range(args.retries + 1):
+        try:
+            return command()
+        except (ClientThrottledError, PleaseWaitFewMinutes) as error:
+            if attempt == args.retries:
+                raise
+            delay = args.retry_delay * (2 ** attempt)
+            pc.printout(
+                "Rate limit while running '{}': {}. Retrying in {} seconds ({}/{})...\n".format(
+                    name, error, delay, attempt + 1, args.retries
+                ),
+                pc.YELLOW,
+            )
+            time.sleep(delay)
 
 
 commands = {
@@ -191,7 +215,7 @@ while True:
         _cmd = commands.get(cmd)
 
     if _cmd:
-        _cmd()
+        execute_with_retry(_cmd, cmd)
     elif cmd == "FILE=y":
         api.set_write_file(True)
     elif cmd == "FILE=n":
