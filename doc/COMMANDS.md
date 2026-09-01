@@ -122,5 +122,3 @@ Return a list of users who commented target's photos sorted by number of comment
 
 ## wtagged
 Return a list of users who tagged target sorted by number of photos
-
-

@@ -2,7 +2,9 @@ import datetime
 import json
 import sys
 import urllib
+import urllib.request
 import codecs
+import shutil
 from pathlib import Path
 
 import ssl
@@ -52,6 +54,47 @@ class HikerCLI:
         self.__printTargetBanner__()
         self.output_dir = self.output_dir + "/" + str(self.target)
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        self.json_dir = Path(self.output_dir) / "json"
+        self.txt_dir = Path(self.output_dir) / "txt"
+        self.posts_dir = Path(self.output_dir) / "media" / "posts"
+        self.profile_pic_dir = Path(self.output_dir) / "media" / "profile_pic"
+        self.stories_dir = Path(self.output_dir) / "media" / "stories"
+        for directory in (
+            self.json_dir,
+            self.txt_dir,
+            self.posts_dir,
+            self.profile_pic_dir,
+            self.stories_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        self._organize_existing_output()
+
+    def _organize_existing_output(self):
+        target_dir = Path(self.output_dir)
+        for file in target_dir.iterdir():
+            if not file.is_file():
+                continue
+            if file.suffix == ".json":
+                destination_dir = self.json_dir
+            elif file.suffix == ".txt":
+                destination_dir = self.txt_dir
+            elif file.name.endswith("_propic.jpg"):
+                destination_dir = self.profile_pic_dir
+            elif file.suffix in (".jpg", ".jpeg", ".png", ".mp4", ".mov"):
+                destination_dir = self.posts_dir
+            else:
+                continue
+            destination = destination_dir / file.name
+            if not destination.exists():
+                shutil.move(str(file), str(destination))
+
+        legacy_media_dir = target_dir / "media"
+        if legacy_media_dir.is_dir():
+            for file in legacy_media_dir.iterdir():
+                if file.is_file():
+                    destination = self.posts_dir / file.name
+                    if not destination.exists():
+                        shutil.move(str(file), str(destination))
 
     def __get_feed__(self, limit=-1):
         data = []
@@ -66,6 +109,62 @@ class HikerCLI:
             if not next_page_id:
                 break
         return data
+
+    def get_media_urls(self):
+        if self.check_private_profile():
+            return
+
+        pc.printout("Searching for target media URLs...\n")
+        media = []
+        for item in self.__get_feed__():
+            urls = []
+            items = item.get("carousel_media") or [item]
+            for child in items:
+                candidates = child.get("image_versions2", {}).get("candidates", [])
+                if candidates:
+                    urls.append(candidates[0].get("url"))
+                video_versions = child.get("video_versions", [])
+                if video_versions:
+                    urls.append(video_versions[0].get("url"))
+
+            media.append({
+                "id": str(item.get("id") or item.get("pk")),
+                "taken_at": item.get("taken_at"),
+                "caption": (item.get("caption") or {}).get("text"),
+                "urls": [url for url in urls if url],
+            })
+
+        if self.jsonDump:
+            path = self.json_dir / (self.target + "_media.json")
+            with open(path, "w") as file:
+                json.dump({"media": media}, file, indent=2)
+        if self.writeFile:
+            path = self.txt_dir / (self.target + "_media.txt")
+            with open(path, "w") as file:
+                for item in media:
+                    file.write("Post {}\n".format(item["id"]))
+                    for url in item["urls"]:
+                        file.write(url + "\n")
+                    file.write("\n")
+
+        downloaded = 0
+        for item in media:
+            post_id = item["id"].replace("/", "_")
+            for index, url in enumerate(item["urls"], start=1):
+                extension = ".mp4" if ".mp4" in url.split("?")[0] else ".jpg"
+                destination = self.posts_dir / "{}_{}{}".format(post_id, index, extension)
+                try:
+                    urllib.request.urlretrieve(url, destination)
+                    downloaded += 1
+                except Exception as error:
+                    pc.printout("Could not download {}: {}\n".format(url, error), pc.RED)
+
+        pc.printout(
+            "Saved URLs for {} media posts and downloaded {} files.\n".format(
+                len(media), downloaded
+            ),
+            pc.GREEN,
+        )
 
     def __get_comments__(self, media_id, limit=-1):
         data = []
@@ -154,14 +253,14 @@ class HikerCLI:
                 i = i + 1
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_addrs.txt"
+                file_name = self.txt_dir / (self.target + "_addrs.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data["address"] = addrs_list
-                json_file_name = self.output_dir + "/" + self.target + "_addrs.json"
+                json_file_name = self.json_dir / (self.target + "_addrs.json")
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
 
@@ -204,7 +303,7 @@ class HikerCLI:
             file = None
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_captions.txt"
+                file_name = self.txt_dir / (self.target + "_captions.txt")
                 file = open(file_name, "w")
 
             for s in captions:
@@ -216,7 +315,7 @@ class HikerCLI:
             if self.jsonDump:
                 json_data["captions"] = captions
                 json_file_name = (
-                    self.output_dir + "/" + self.target + "_followings.json"
+                    self.json_dir / (self.target + "_followings.json")
                 )
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
@@ -246,7 +345,7 @@ class HikerCLI:
         result = f" comments in {posts} posts (min: {min_}, max: {max_}, avg: {avg})\n"
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_comments.txt"
+            file_name = self.txt_dir / (self.target + "_comments.txt")
             file = open(file_name, "w")
             file.write(
                 str(comments_counter) + " comments in " + str(posts) + " posts\n"
@@ -255,7 +354,7 @@ class HikerCLI:
 
         if self.jsonDump:
             json_data = {"comment_counter": comments_counter, "posts": posts}
-            json_file_name = self.output_dir + "/" + self.target + "_comments.json"
+            json_file_name = self.json_dir / (self.target + "_comments.json")
             with open(json_file_name, "w") as f:
                 json.dump(json_data, f)
 
@@ -298,13 +397,13 @@ class HikerCLI:
 
         print(t)
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_comment_data.txt"
+            file_name = self.txt_dir / (self.target + "_comment_data.txt")
             with open(file_name, "w") as f:
                 f.write(str(t))
                 f.close()
 
         if self.jsonDump:
-            file_name_json = self.output_dir + "/" + self.target + "_comment_data.json"
+            file_name_json = self.json_dir / (self.target + "_comment_data.json")
             with open(file_name_json, "w") as f:
                 f.write('{ "Comments":[ \n')
                 f.write("\n".join(json.dumps(comment) for comment in _comments) + ",\n")
@@ -349,14 +448,14 @@ class HikerCLI:
                 items.append(u)
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_followers.txt"
+            file_name = self.txt_dir / (self.target + "_followers.txt")
             file = open(file_name, "w")
             file.write(str(t))
             file.close()
 
         if self.jsonDump:
             json_data = {"followers": items}
-            json_file_name = self.output_dir + "/" + self.target + "_followers.json"
+            json_file_name = self.json_dir / (self.target + "_followers.json")
             with open(json_file_name, "w") as f:
                 json.dump(json_data, f)
 
@@ -401,14 +500,14 @@ class HikerCLI:
                 items.append(u)
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_followings.txt"
+            file_name = self.txt_dir / (self.target + "_followings.txt")
             file = open(file_name, "w")
             file.write(str(t))
             file.close()
 
         if self.jsonDump:
             json_data = {"followings": items}
-            json_file_name = self.output_dir + "/" + self.target + "_followings.json"
+            json_file_name = self.json_dir / (self.target + "_followings.json")
             with open(json_file_name, "w") as f:
                 json.dump(json_data, f)
 
@@ -447,7 +546,7 @@ class HikerCLI:
             hashtags_list = []
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_hashtags.txt"
+                file_name = self.txt_dir / (self.target + "_hashtags.txt")
                 file = open(file_name, "w")
 
             print()
@@ -464,7 +563,7 @@ class HikerCLI:
 
             if self.jsonDump:
                 json_data = {"hashtags": hashtags_list}
-                json_file_name = self.output_dir + "/" + self.target + "_hashtags.json"
+                json_file_name = self.json_dir / (self.target + "_hashtags.json")
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
         else:
@@ -540,7 +639,7 @@ class HikerCLI:
             if "contact_phone_number" in data and data["contact_phone_number"]:
                 user["contact_phone_number"] = data["contact_phone_number"]
 
-            json_file_name = self.output_dir + "/" + self.target + "_info.json"
+            json_file_name = self.json_dir / (self.target + "_info.json")
             with open(json_file_name, "w") as f:
                 json.dump(user, f)
 
@@ -561,7 +660,7 @@ class HikerCLI:
         result = f" likes in {posts} posts (min: {min_}, max: {max_}, avg: {avg})\n"
 
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_likes.txt"
+            file_name = self.txt_dir / (self.target + "_likes.txt")
             file = open(file_name, "w")
             file.write(str(like_counter) + result)
             file.close()
@@ -574,7 +673,7 @@ class HikerCLI:
                 "max": max_,
                 "avg": avg,
             }
-            json_file_name = self.output_dir + "/" + self.target + "_likes.json"
+            json_file_name = self.json_dir / (self.target + "_likes.json")
             with open(json_file_name, "w") as f:
                 json.dump(json_data, f)
 
@@ -609,7 +708,7 @@ class HikerCLI:
         if counter > 0:
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_mediatype.txt"
+                file_name = self.txt_dir / (self.target + "_mediatype.txt")
                 file = open(file_name, "w")
                 file.write(
                     str(photo_counter)
@@ -630,7 +729,7 @@ class HikerCLI:
 
             if self.jsonDump:
                 json_data = {"photos": photo_counter, "videos": video_counter}
-                json_file_name = self.output_dir + "/" + self.target + "_mediatype.json"
+                json_file_name = self.json_dir / (self.target + "_mediatype.json")
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
 
@@ -683,7 +782,7 @@ class HikerCLI:
 
             if self.writeFile:
                 file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_commented.txt"
+                    self.txt_dir / (self.target + "_users_who_commented.txt")
                 )
                 file = open(file_name, "w")
                 file.write(str(t))
@@ -692,7 +791,7 @@ class HikerCLI:
             if self.jsonDump:
                 json_data["users_who_commented"] = ssort
                 json_file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_commented.json"
+                    self.json_dir / (self.target + "_users_who_commented.json")
                 )
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
@@ -748,7 +847,7 @@ class HikerCLI:
 
             if self.writeFile:
                 file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_tagged.txt"
+                    self.txt_dir / (self.target + "_users_who_tagged.txt")
                 )
                 file = open(file_name, "w")
                 file.write(str(t))
@@ -757,7 +856,7 @@ class HikerCLI:
             if self.jsonDump:
                 json_data = {"users_who_tagged": ssort}
                 json_file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_tagged.json"
+                    self.json_dir / (self.target + "_users_who_tagged.json")
                 )
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
@@ -797,7 +896,7 @@ class HikerCLI:
                 counter += 1
                 url = item["image_versions2"]["candidates"][0]["url"]
                 photo_id = item["id"]
-                end = self.output_dir + "/" + self.target + "_" + photo_id + ".jpg"
+                end = self.posts_dir / (self.target + "_" + photo_id + ".jpg")
                 urllib.request.urlretrieve(url, end)
                 sys.stdout.write("\rDownloaded %i" % counter)
                 sys.stdout.flush()
@@ -809,7 +908,7 @@ class HikerCLI:
                     counter += 1
                     url = i["image_versions2"]["candidates"][0]["url"]
                     photo_id = i["id"]
-                    end = self.output_dir + "/" + self.target + "_" + photo_id + ".jpg"
+                    end = self.posts_dir / (self.target + "_" + photo_id + ".jpg")
                     urllib.request.urlretrieve(url, end)
                     sys.stdout.write("\rDownloaded %i" % counter)
                     sys.stdout.flush()
@@ -829,7 +928,7 @@ class HikerCLI:
             url = data["hd_profile_pic_versions"][items - 1]["url"]
 
         if url != "":
-            end = self.output_dir + "/" + self.target + "_propic.jpg"
+            end = self.profile_pic_dir / (self.target + "_propic.jpg")
             urllib.request.urlretrieve(url, end)
             pc.printout("Target propic saved in output folder\n", pc.GREEN)
 
@@ -851,11 +950,11 @@ class HikerCLI:
                 story_id = i["id"]
                 if i["media_type"] == 1:  # photo
                     url = i["image_versions2"]["candidates"][0]["url"]
-                    end = self.output_dir + "/" + self.target + "_" + story_id + ".jpg"
+                    end = self.stories_dir / (self.target + "_" + story_id + ".jpg")
                     urllib.request.urlretrieve(url, end)
                 elif i["media_type"] == 2:  # video
                     url = i["video_versions"][0]["url"]
-                    end = self.output_dir + "/" + self.target + "_" + story_id + ".mp4"
+                    end = self.stories_dir / (self.target + "_" + story_id + ".mp4")
                     urllib.request.urlretrieve(url, end)
 
         if counter > 0:
@@ -920,14 +1019,14 @@ class HikerCLI:
                     tagged_list.append(tag)
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + "_tagged.txt"
+                file_name = self.txt_dir / (self.target + "_tagged.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
 
             if self.jsonDump:
                 json_data["tagged"] = tagged_list
-                json_file_name = self.output_dir + "/" + self.target + "_tagged.json"
+                json_file_name = self.json_dir / (self.target + "_tagged.json")
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
 
@@ -951,7 +1050,7 @@ class HikerCLI:
             exit(2)
         user = data["user"]
         if self.writeFile:
-            file_name = self.output_dir + "/" + self.target + "_user_id.txt"
+            file_name = self.txt_dir / (self.target + "_user_id.txt")
             file = open(file_name, "w")
             file.write(str(user["pk"]))
             file.close()
@@ -1070,7 +1169,7 @@ class HikerCLI:
                 )
 
             if self.writeFile:
-                file_name = self.output_dir + "/" + self.target + f"_{file_name}.txt"
+                file_name = self.txt_dir / (self.target + f"_{file_name}.txt")
                 file = open(file_name, "w")
                 file.write(str(t))
                 file.close()
@@ -1078,7 +1177,7 @@ class HikerCLI:
             if self.jsonDump:
                 json_data = {json_key: results}
                 json_file_name = (
-                    self.output_dir + "/" + self.target + f"_{file_name}.json"
+                    self.json_dir / (self.target + f"_{file_name}.json")
                 )
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
@@ -1180,7 +1279,7 @@ class HikerCLI:
 
             if self.writeFile:
                 file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_commented.txt"
+                    self.txt_dir / (self.target + "_users_who_commented.txt")
                 )
                 file = open(file_name, "w")
                 file.write(str(t))
@@ -1189,7 +1288,7 @@ class HikerCLI:
             if self.jsonDump:
                 json_data = {"users_who_commented": ssort}
                 json_file_name = (
-                    self.output_dir + "/" + self.target + "_users_who_commented.json"
+                    self.json_dir / (self.target + "_users_who_commented.json")
                 )
                 with open(json_file_name, "w") as f:
                     json.dump(json_data, f)
